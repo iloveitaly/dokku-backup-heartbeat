@@ -1,0 +1,14 @@
+{
+  "description": "Dokku plugin that sends an HTTPS heartbeat notification after a successful datastore backup.",
+  "homepage": "https://github.com/iloveitaly/dokku-backup-heartbeat",
+  "keywords": [
+    "dokku",
+    "dokku-plugin",
+    "backup",
+    "heartbeat",
+    "monitoring",
+    "uptime",
+    "postgres",
+    "devops"
+  ]
+}
