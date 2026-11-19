@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# shellcheck source-path=SCRIPTDIR
+set -euo pipefail
+set +x
+
+PLUGIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=config
+source "$PLUGIN_DIR/config"
+# shellcheck source=functions
+source "$PLUGIN_DIR/functions"
+
+if [[ $# -ne 5 ]]; then
+  exit 0
+fi
+
+action="$1"
+datastore="$2"
+service="$3"
+bucket="$4"
+status="$5"
+
+if [[ -z "$action" || -z "$datastore" || -z "$service" || -z "$bucket" || -z "$status" ]]; then
+  exit 0
+fi
+
+if [[ "$action" != "post-backup" || "$status" != "success" ]]; then
+  exit 0
+fi
+
+if ! fn_validate_datastore "$datastore" || ! fn_validate_service "$service" || ! fn_validate_bucket "$bucket"; then
+  exit 0
+fi
+
+target_dir="$PLUGIN_TARGETS_ROOT/$(fn_target_key "$datastore" "$service" "$bucket")"
+if [[ ! -d "$target_dir" || ! -f "$target_dir/datastore" || ! -f "$target_dir/service" || ! -f "$target_dir/bucket" || ! -f "$target_dir/url" ]]; then
+  exit 0
+fi
+
+stored_datastore="$(fn_read_metadata_file "$target_dir/datastore")" || exit 0
+stored_service="$(fn_read_metadata_file "$target_dir/service")" || exit 0
+stored_bucket="$(fn_read_metadata_file "$target_dir/bucket")" || exit 0
+
+if [[ "$stored_datastore" != "$datastore" || "$stored_service" != "$service" || "$stored_bucket" != "$bucket" ]]; then
+  exit 0
+fi
+
+fn_send_heartbeat "$datastore" "$service" "$bucket" "$target_dir/url"

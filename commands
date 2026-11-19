@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# shellcheck source-path=SCRIPTDIR
+set -euo pipefail
+set +x
+
+PLUGIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=config
+source "$PLUGIN_DIR/config"
+# shellcheck source=functions
+source "$PLUGIN_DIR/functions"
+
+case "${1:-}" in
+  help)
+    fn_help_content
+    ;;
+  backup-heartbeat:help|backup-heartbeat|backup-heartbeat:default)
+    fn_help_usage
+    ;;
+  *)
+    exit "$DOKKU_NOT_IMPLEMENTED_EXIT"
+    ;;
+esac

@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# shellcheck source-path=SCRIPTDIR
+set -euo pipefail
+set +x
+
+PLUGIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../config
+source "$PLUGIN_DIR/config"
+# shellcheck source=../functions
+source "$PLUGIN_DIR/functions"
+
+if [[ "${1:-}" == "backup-heartbeat:unset" ]]; then
+  shift
+fi
+
+if [[ $# -ne 3 ]]; then
+  fn_help_usage >&2
+  dokku_log_fail "Usage: dokku backup-heartbeat:unset <datastore> <service> <bucket>"
+fi
+
+datastore="$1"
+service="$2"
+bucket="$3"
+
+if ! fn_validate_datastore "$datastore"; then
+  dokku_log_fail "Invalid datastore name (must match ^[a-z0-9][a-z0-9_-]*$)"
+fi
+
+if ! fn_validate_service "$service"; then
+  dokku_log_fail "Invalid service name (must match ^[A-Za-z0-9][A-Za-z0-9._-]*$ and not be . or ..)"
+fi
+
+if ! fn_validate_bucket "$bucket"; then
+  dokku_log_fail "Invalid bucket name (must be non-empty without whitespace or control characters)"
+fi
+
+target_dir="$PLUGIN_TARGETS_ROOT/$(fn_target_key "$datastore" "$service" "$bucket")"
+if [[ ! -d "$target_dir" ]]; then
+  dokku_log_fail "No backup heartbeat configured for ${datastore}:${service} (${bucket})"
+fi
+
+rm -rf -- "$target_dir"
+dokku_log_info1 "Backup heartbeat removed for ${datastore}:${service} (${bucket})"

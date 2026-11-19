@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# shellcheck source-path=SCRIPTDIR
+set -euo pipefail
+set +x
+
+PLUGIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../config
+source "$PLUGIN_DIR/config"
+# shellcheck source=../functions
+source "$PLUGIN_DIR/functions"
+
+if [[ "${1:-}" == "backup-heartbeat:report" ]]; then
+  shift
+fi
+
+if [[ $# -gt 3 ]]; then
+  fn_help_usage >&2
+  dokku_log_fail "Usage: dokku backup-heartbeat:report [<datastore> [<service> [<bucket>]]]"
+fi
+
+filter_datastore="${1:-}"
+filter_service="${2:-}"
+filter_bucket="${3:-}"
+
+if [[ $# -ge 1 ]] && ! fn_validate_datastore "$filter_datastore"; then
+  dokku_log_fail "Invalid datastore filter (must match ^[a-z0-9][a-z0-9_-]*$)"
+fi
+if [[ $# -ge 2 ]] && ! fn_validate_service "$filter_service"; then
+  dokku_log_fail "Invalid service filter (must match ^[A-Za-z0-9][A-Za-z0-9._-]*$ and not be . or ..)"
+fi
+if [[ $# -ge 3 ]] && ! fn_validate_bucket "$filter_bucket"; then
+  dokku_log_fail "Invalid bucket filter (must be non-empty without whitespace or control characters)"
+fi
+
+if [[ ! -d "$PLUGIN_TARGETS_ROOT" ]]; then
+  dokku_log_info1 "No backup heartbeats configured"
+  exit 0
+fi
+
+shopt -s nullglob
+shopt -u dotglob
+
+lines=()
+for dir in "$PLUGIN_TARGETS_ROOT"/*; do
+  [[ -d "$dir" ]] || continue
+  [[ -f "$dir/datastore" && -f "$dir/service" && -f "$dir/bucket" ]] || continue
+
+  ds="$(fn_read_metadata_file "$dir/datastore")" || continue
+  svc="$(fn_read_metadata_file "$dir/service")" || continue
+  bkt="$(fn_read_metadata_file "$dir/bucket")" || continue
+
+  if [[ -n "$filter_datastore" && "$ds" != "$filter_datastore" ]]; then
+    continue
+  fi
+  if [[ -n "$filter_service" && "$svc" != "$filter_service" ]]; then
+    continue
+  fi
+  if [[ -n "$filter_bucket" && "$bkt" != "$filter_bucket" ]]; then
+    continue
+  fi
+
+  url_state="url missing"
+  if [[ -s "$dir/url" ]]; then
+    url_state="url configured"
+  fi
+  lines+=("${ds} ${svc} ${bkt} (${url_state})")
+done
+
+if [[ ${#lines[@]} -eq 0 ]]; then
+  dokku_log_info1 "No backup heartbeats configured"
+  exit 0
+fi
+
+dokku_log_info1 "Backup heartbeat targets"
+while IFS= read -r line; do
+  dokku_log_verbose "$line"
+done < <(printf '%s\n' "${lines[@]}" | LC_ALL=C sort)

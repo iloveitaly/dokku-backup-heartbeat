@@ -1,0 +1,288 @@
+#!/usr/bin/env bash
+set +x
+
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=config
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/config"
+
+if [[ -n "${PLUGIN_CORE_AVAILABLE_PATH:-}" && -f "$PLUGIN_CORE_AVAILABLE_PATH/common/functions" ]]; then
+  _had_nounset=false
+  [[ $- == *u* ]] && _had_nounset=true
+  _had_dokku_trace=false
+  _saved_dokku_trace=""
+  if [[ -n "${DOKKU_TRACE+x}" ]]; then
+    _had_dokku_trace=true
+    _saved_dokku_trace="$DOKKU_TRACE"
+  fi
+  set +u
+  unset DOKKU_TRACE
+  # shellcheck source=/dev/null
+  source "$PLUGIN_CORE_AVAILABLE_PATH/common/functions"
+  set +x
+  if [[ "$_had_dokku_trace" == "true" ]]; then
+    export DOKKU_TRACE="$_saved_dokku_trace"
+  fi
+  if [[ "$_had_nounset" == "true" ]]; then
+    set -u
+  fi
+  unset _had_nounset _had_dokku_trace _saved_dokku_trace
+else
+  dokku_log_info1() {
+    echo "-----> $*"
+  }
+  dokku_log_verbose() {
+    echo "       $*"
+  }
+  dokku_log_warn() {
+    echo " !     $*" >&2
+  }
+  dokku_log_fail() {
+    echo " !     $*" >&2
+    exit 1
+  }
+fi
+
+fn_sha256() {
+  local digest=""
+  if command -v sha256sum >/dev/null 2>&1; then
+    digest="$(sha256sum | awk '{print $1}')"
+  elif command -v shasum >/dev/null 2>&1; then
+    digest="$(shasum -a 256 | awk '{print $1}')"
+  elif command -v openssl >/dev/null 2>&1; then
+    digest="$(openssl dgst -sha256 | awk '{print $NF}')"
+  else
+    dokku_log_fail "$PLUGIN_SERVICE: No SHA-256 tool available (sha256sum, shasum, or openssl required)"
+  fi
+
+  digest="$(printf '%s' "$digest" | tr '[:upper:]' '[:lower:]')"
+  if [[ ! "$digest" =~ ^[0-9a-f]{64}$ ]]; then
+    dokku_log_fail "$PLUGIN_SERVICE: Failed to compute valid SHA-256 digest"
+  fi
+  printf '%s\n' "$digest"
+}
+
+fn_target_key() {
+  local datastore="${1:-}"
+  local service="${2:-}"
+  local bucket="${3:-}"
+  printf '%s\n%s\n%s\n' "$datastore" "$service" "$bucket" | fn_sha256
+}
+
+fn_validate_datastore() {
+  local datastore="${1:-}"
+  [[ -n "$datastore" && "$datastore" =~ ^[a-z0-9][a-z0-9_-]*$ ]]
+}
+
+fn_validate_service() {
+  local service="${1:-}"
+  [[ -n "$service" && "$service" != "." && "$service" != ".." && "$service" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]
+}
+
+fn_validate_bucket() {
+  local bucket="${1:-}"
+  [[ -n "$bucket" ]] && ! [[ "$bucket" =~ [[:space:][:cntrl:]] ]]
+}
+
+fn_validate_timeout() {
+  local timeout="${1:-}"
+  [[ -n "$timeout" && "$timeout" =~ ^[1-9][0-9]*$ ]]
+}
+
+fn_validate_https_url() {
+  set +x
+  local url="${1:-}"
+  [[ -n "$url" ]] || return 1
+  (( ${#url} <= 8192 )) || return 1
+  ! [[ "$url" =~ [[:space:][:cntrl:]] ]] || return 1
+  [[ "$url" =~ ^https://[^[:space:][:cntrl:]/?#]+ ]] || return 1
+  return 0
+}
+
+fn_ensure_data_root() {
+  if ! mkdir -p "$(dirname "$PLUGIN_DATA_ROOT")" 2>/dev/null; then
+    dokku_log_fail "$PLUGIN_SERVICE: Please run: sudo dokku plugin:install"
+  fi
+  if ! (umask 077 && mkdir -p "$PLUGIN_DATA_ROOT" "$PLUGIN_TARGETS_ROOT") 2>/dev/null; then
+    dokku_log_fail "$PLUGIN_SERVICE: Please run: sudo dokku plugin:install"
+  fi
+  if ! chmod 0700 "$PLUGIN_DATA_ROOT" "$PLUGIN_TARGETS_ROOT" 2>/dev/null; then
+    dokku_log_fail "$PLUGIN_SERVICE: Please run: sudo dokku plugin:install"
+  fi
+}
+
+fn_read_metadata_file() {
+  local file="${1:-}"
+  local raw=""
+  [[ -f "$file" && -r "$file" ]] || return 1
+  raw="$(head -c 4097 "$file" 2>/dev/null && printf x)" || return 1
+  raw="${raw%x}"
+  (( ${#raw} <= 4096 )) || return 1
+  raw="${raw%$'\n'}"
+  printf '%s' "$raw"
+}
+
+fn_target_write() {
+  set +x
+  local datastore="${1:-}"
+  local service="${2:-}"
+  local bucket="${3:-}"
+  local url="${4:-}"
+
+  fn_ensure_data_root
+
+  local key=""
+  key="$(fn_target_key "$datastore" "$service" "$bucket")"
+  local target_dir="$PLUGIN_TARGETS_ROOT/$key"
+
+  (
+    set +x
+    umask 077
+    local _cleanup_tmp=""
+    trap '[[ -n "${_cleanup_tmp:-}" ]] && rm -f -- "$_cleanup_tmp"' EXIT INT TERM
+
+    mkdir -m 0700 "$target_dir" 2>/dev/null || chmod 0700 "$target_dir" || exit 1
+
+    local field="" val="" existing=""
+    for field in datastore service bucket; do
+      case "$field" in
+        datastore) val="$datastore" ;;
+        service) val="$service" ;;
+        bucket) val="$bucket" ;;
+      esac
+      if [[ -f "$target_dir/$field" ]]; then
+        existing="$(fn_read_metadata_file "$target_dir/$field")" || exit 1
+        [[ "$existing" == "$val" ]] || exit 1
+        chmod 0600 "$target_dir/$field" || exit 1
+      else
+        _cleanup_tmp="$(mktemp "$target_dir/.${field}.XXXXXX")" || exit 1
+        chmod 0600 "$_cleanup_tmp" || exit 1
+        printf '%s\n' "$val" > "$_cleanup_tmp" || exit 1
+        mv -f "$_cleanup_tmp" "$target_dir/$field" || exit 1
+        _cleanup_tmp=""
+        chmod 0600 "$target_dir/$field" || exit 1
+      fi
+    done
+
+    _cleanup_tmp="$(mktemp "$target_dir/.url.XXXXXX")" || exit 1
+    chmod 0600 "$_cleanup_tmp" || exit 1
+    printf '%s\n' "$url" > "$_cleanup_tmp" || exit 1
+    mv -f "$_cleanup_tmp" "$target_dir/url" || exit 1
+    _cleanup_tmp=""
+    chmod 0600 "$target_dir/url" || exit 1
+  ) || dokku_log_fail "$PLUGIN_SERVICE: Failed to write heartbeat target configuration"
+}
+
+fn_read_url_from_stdin() {
+  set +x
+  if [[ -t 0 ]]; then
+    dokku_log_fail "Provide the HTTPS heartbeat URL on stdin (do not pass it as a command argument)"
+  fi
+
+  local raw=""
+  raw="$(head -c 8195 && printf x)" || dokku_log_fail "Failed to read HTTPS heartbeat URL from stdin"
+  raw="${raw%x}"
+  raw="${raw%$'\n'}"
+  raw="${raw%$'\r'}"
+  if (( ${#raw} > 8192 )); then
+    dokku_log_fail "Invalid HTTPS heartbeat URL: exceeds maximum length of 8192 bytes"
+  fi
+
+  if ! fn_validate_https_url "$raw"; then
+    dokku_log_fail "Invalid or missing HTTPS heartbeat URL on stdin (must be an HTTPS URL with no whitespace or control characters)"
+  fi
+
+  printf '%s' "$raw"
+}
+
+fn_send_heartbeat() {
+  set +x
+  local datastore="${1:-}"
+  local service="${2:-}"
+  local bucket="${3:-}"
+  local url_file="${4:-}"
+
+  if [[ ! -f "$url_file" || ! -r "$url_file" ]]; then
+    dokku_log_warn "backup-heartbeat: unreadable heartbeat URL file for ${datastore}:${service} (${bucket})"
+    return 1
+  fi
+
+  local raw=""
+  raw="$(head -c 8195 "$url_file" 2>/dev/null && printf x)" || {
+    dokku_log_warn "backup-heartbeat: failed to read heartbeat URL file for ${datastore}:${service} (${bucket})"
+    return 1
+  }
+  raw="${raw%x}"
+  raw="${raw%$'\n'}"
+  raw="${raw%$'\r'}"
+  if (( ${#raw} > 8192 )); then
+    dokku_log_warn "backup-heartbeat: invalid heartbeat URL length for ${datastore}:${service} (${bucket})"
+    return 1
+  fi
+
+  local url="$raw"
+  if ! fn_validate_https_url "$url"; then
+    dokku_log_warn "backup-heartbeat: invalid heartbeat URL configured for ${datastore}:${service} (${bucket})"
+    return 1
+  fi
+
+  if ! fn_validate_timeout "$BACKUP_HEARTBEAT_TIMEOUT"; then
+    dokku_log_warn "backup-heartbeat: invalid timeout configured for ${datastore}:${service} (${bucket})"
+    return 1
+  fi
+
+  local http_code=""
+  local curl_exit=0
+  http_code="$(
+    HEARTBEAT_URL="$url" "$BACKUP_HEARTBEAT_CURL_BIN" \
+      --silent \
+      --fail \
+      --globoff \
+      --request GET \
+      --proto '=https' \
+      --proto-redir '=https' \
+      --max-time "$BACKUP_HEARTBEAT_TIMEOUT" \
+      --output /dev/null \
+      --write-out '%{http_code}' \
+      --variable '%HEARTBEAT_URL' \
+      --expand-url '{{HEARTBEAT_URL}}' \
+      2>/dev/null
+  )" || curl_exit=$?
+
+  if [[ "$curl_exit" -eq 0 && "$http_code" =~ ^2[0-9][0-9]$ ]]; then
+    dokku_log_info1 "backup-heartbeat: heartbeat sent for ${datastore}:${service} (${bucket}) (HTTP ${http_code})"
+    return 0
+  elif [[ "$curl_exit" -eq 28 ]]; then
+    dokku_log_warn "backup-heartbeat: heartbeat timed out after ${BACKUP_HEARTBEAT_TIMEOUT}s for ${datastore}:${service} (${bucket}) (curl exit ${curl_exit})"
+    return 1
+  elif [[ "$http_code" =~ ^[1-5][0-9][0-9]$ ]]; then
+    dokku_log_warn "backup-heartbeat: heartbeat failed with HTTP ${http_code} for ${datastore}:${service} (${bucket})"
+    return 1
+  else
+    dokku_log_warn "backup-heartbeat: heartbeat request failed for ${datastore}:${service} (${bucket}) (curl exit ${curl_exit})"
+    return 1
+  fi
+}
+
+fn_help_content() {
+  cat <<'EOF'
+    backup-heartbeat:set <datastore> <service> <bucket>, Configure HTTPS heartbeat URL from stdin for a datastore backup target
+    backup-heartbeat:unset <datastore> <service> <bucket>, Remove heartbeat configuration for a datastore backup target
+    backup-heartbeat:report [<datastore> [<service> [<bucket>]]], Display configured backup heartbeat targets (never prints URLs)
+EOF
+}
+
+fn_help_usage() {
+  cat <<'EOF'
+Usage: dokku backup-heartbeat:<command>
+
+Configure HTTPS heartbeat notifications after successful datastore backups.
+
+Commands:
+    backup-heartbeat:set <datastore> <service> <bucket>           Read HTTPS heartbeat URL from stdin and save target config
+    backup-heartbeat:unset <datastore> <service> <bucket>         Remove target heartbeat configuration
+    backup-heartbeat:report [<datastore> [<service> [<bucket>]]]  Display configured targets (URLs are never displayed)
+
+Example:
+    printf '%s\n' "$HEARTBEAT_URL" | dokku backup-heartbeat:set postgres my_db my-bucket/prefix
+EOF
+}

@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# shellcheck source-path=SCRIPTDIR
+set -euo pipefail
+set +x
+
+PLUGIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=config
+source "$PLUGIN_DIR/config"
+# shellcheck source=functions
+source "$PLUGIN_DIR/functions"
+
+mkdir -p "$(dirname "$PLUGIN_DATA_ROOT")"
+(umask 077 && mkdir -p "$PLUGIN_DATA_ROOT" "$PLUGIN_TARGETS_ROOT")
+chmod 0700 "$PLUGIN_DATA_ROOT" "$PLUGIN_TARGETS_ROOT"
+
+if [[ "$(id -u)" -eq 0 ]]; then
+  chown -R "${DOKKU_SYSTEM_USER}:${DOKKU_SYSTEM_GROUP}" "$PLUGIN_DATA_ROOT"
+fi
