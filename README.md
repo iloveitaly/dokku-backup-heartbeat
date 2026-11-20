@@ -2,6 +2,8 @@
 
 A Dokku plugin that sends an HTTPS GET heartbeat after a successful `dokku-datastore` backup using the `v0.12.0+` `service-action` `post-backup` trigger.
 
+Uptime Kuma and similar tools can alert you when a scheduled backup fails or is missed. The plugin sends each successful backup's heartbeat to the monitor's HTTPS push URL, configured with `backup-heartbeat:set`. The monitor can notify you if no heartbeat arrives within the configured interval. See the [Uptime Kuma Push endpoint documentation](https://github.com/louislam/uptime-kuma/wiki/Internal-API#push-endpoint).
+
 ## Requirements
 
 - Dokku with `dokku-datastore` `v0.12.0+` for `service-action` `post-backup` dispatch
